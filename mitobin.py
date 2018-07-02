@@ -18,7 +18,8 @@ from Bio import SeqIO
 LOG_ERROR, LOG_WARN, LOG_INFO = range(3)
 RANK_LIST = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
 RANK_ORDER = {rank: order for (order, rank) in enumerate(RANK_LIST)}
-#All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
+# All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
+
 
 class FileStore:
     """ Manage temporary and cache files """
@@ -130,7 +131,7 @@ class FileStore:
 
         # Extract if an archive
         if self.options == FileStore.FOPT_TAR:
-            handle = tarfile.open(self.path, "r")
+            handle = tarfile.open(self.path, "rt")
             handle.extractall(os.path.dirname(self.path))
 
     def exists(self):
@@ -224,7 +225,7 @@ def populate_synonyms():
     """ Create {synonym: official gene name} lookup, eg {CO1: COX1} """
     synonym_lookup = dict()
 
-    for line in FileStore.get_entry("synonyms").get_handle("r"):
+    for line in FileStore.get_entry("synonyms").get_handle("rt"):
         synonym, standard = line.rstrip().split("\t")
         synonym_lookup[synonym] = standard
 
@@ -359,17 +360,64 @@ def exec_alignment(options):
 
 def populate_bins(quality, rank):
     """ Filter SAM and group aligned reads into bins """
-    # 1. Iterate through SAM output
-    # 2. Filter mapping quality for minimum quality
-    # 3. Group by rank (apply ceiling to ranks out of range)
-    # 4. Populate return dictionary {read_header: bin}
+    bin_lookup = dict()
+    handle = FileStore.get_entry("sam").get_handle("rt")
+
+    for line in handle:
+        sam_fields = line.split("\t")
+
+        # Skip headers, unmapped, and low quality
+        if line.startswith("@"):
+            continue
+
+        if sam_fields[1] == "4":
+            continue
+
+        if int(sam_fields[4]) < quality:
+            continue
+
+        # Confine rank to maximum if necessary
+        ref_fields = sam_fields[2].split("|")
+        rank_count = len(ref_fields) - 3
+        if rank > rank_count:
+            rank = rank_count
+
+        # Save to lookup
+        read_id = ":".join(sam_fields[0].split(":")[3:])
+        bin_lookup[read_id] = (ref_fields[1], ref_fields[len(ref_fields) - rank - 1])
+
+    return bin_lookup
 
 
 def write_bins(bin_lookup):
     """ Separate and write reads into appropriate fastq file """
-    # 1. Iterate through each read
-    # 2. Lookup appropriate bin
-    # 3. Write to bin fq
+    read_handle = FileStore.get_entry("input").get_handle("rt")
+
+    for line in read_handle:
+        write_handle = None
+        read_id = line[1:].split(" ")[0].rstrip()
+
+        # Strip paired end strand ID
+        if len(read_id) > 1 and read_id[-2] == "/":
+            read_id = read_id[:-2]
+
+        # Obtain appropriate handle and write
+        if read_id in bin_lookup:
+            bin_id = "{0}-{1}".format(*bin_lookup[read_id])
+
+            # Add to FileStore if new
+            if bin_id not in FileStore.entries:
+                FileStore(bin_id, bin_id, "{0}.fq".format(bin_id), None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
+
+            # Write header
+            write_handle = FileStore.get_entry(bin_id).get_handle("wt", False)
+            write_handle.write(line)
+
+        # Write/skip subsequent 3 lines
+        for _ in range(3):
+            remaining = read_handle.readline()
+            if write_handle:
+                write_handle.write(remaining)
 
 
 # Parse arguments
