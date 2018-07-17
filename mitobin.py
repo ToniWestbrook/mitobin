@@ -348,9 +348,26 @@ def write_reference(accession_lookup, taxonomy_lookup, synonym_lookup):
 
 def combine_inputs(input_paths):
     """ Concatenate input sequences into single file """
-    # 1. Exit if only a single file
-    # 2. Iterate through all lines of each input 
-    # 3. Write concatenated output to temp handle
+    # Exit if only a single file
+    if len(input_paths) == 1:
+        return
+
+    # Get a handle to the temp file to be used as the concatenated input
+    output_handle = FileStore.get_entry("input").get_handle("wt")
+
+    # Iterate through all lines of each input
+    for input_file in input_paths:
+        file_name = os.path.split(input_file)[1]
+        FileStore("inputs", file_name, input_file, None, FileStore.FTYPE_USER, FileStore.FOPT_NORMAL)
+        input_entry = FileStore.get_entry(file_name, "inputs")
+
+        if not input_entry.exists():
+            log("Input file does not exist: " + input_file, LOG_ERROR)
+
+        # Write concatenated output to temp handle
+        input_handle = input_entry.get_handle("rt")
+        for line in input_handle:
+            output_handle.write(line)
 
 
 def exec_alignment(options):
