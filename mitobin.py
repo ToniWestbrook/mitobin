@@ -16,6 +16,7 @@ from urllib import request
 from Bio import SeqIO
 
 LOG_ERROR, LOG_WARN, LOG_INFO = range(3)
+PALADIN_EXEC = "/home/anthonyw/repo_personal/unh/paladin/paladin"
 RANK_LIST = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
 RANK_ORDER = {rank: order for (order, rank) in enumerate(RANK_LIST)}
 # All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
@@ -34,7 +35,8 @@ class FileStore:
     temp_path = ""
     output_path = ""
 
-    def _populate():
+    @classmethod
+    def _populate(cls):
         """ Add all entries to the file store """
         FileStore("input", "input", "input.fq", None, FileStore.FTYPE_TEMP, FileStore.FOPT_NORMAL)
         FileStore("reference", "reference", "reference.faa", None, FileStore.FTYPE_CACHE, FileStore.FOPT_NORMAL)
@@ -48,7 +50,8 @@ class FileStore:
         FileStore("mito-seq", "mito-seq1", "mito1.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.faa.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
         FileStore("mito-seq", "mito-seq2", "mito2.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.2.protein.faa.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
 
-    def init(output_path):
+    @classmethod
+    def init(cls, output_path):
         """ Initialize the file store  """
         FileStore.temp_path = tempfile.mkdtemp(prefix=FileStore.OUTPUT_BASE)
         FileStore.output_path = output_path
@@ -62,7 +65,8 @@ class FileStore:
         # Populate file store
         FileStore._populate()
 
-    def destroy():
+    @classmethod
+    def destroy(cls):
         """ Destroy the file store """
         # Close all open files
         for group in FileStore.entries.values():
@@ -73,14 +77,16 @@ class FileStore:
         # Delete temporary directorty
         shutil.rmtree(FileStore.temp_path)
 
-    def get_entry(name, group=None):
+    @classmethod
+    def get_entry(cls, name, group=None):
         """ Get a file entry from the store """
         if group:
             return FileStore.entries[group][name]
         else:
             return FileStore.entries[name][name]
 
-    def get_group(group):
+    @classmethod
+    def get_group(cls, group):
         """ Get all entries for a group """
         return FileStore.entries[group].values()
 
@@ -131,7 +137,7 @@ class FileStore:
 
         # Extract if an archive
         if self.options == FileStore.FOPT_TAR:
-            handle = tarfile.open(self.path, "rt")
+            handle = tarfile.open(self.path, "r")
             handle.extractall(os.path.dirname(self.path))
 
     def exists(self):
@@ -346,6 +352,13 @@ def write_reference(accession_lookup, taxonomy_lookup, synonym_lookup):
                 output_handle.write(line)
 
 
+def index_reference():
+    """ Create aligner index for the reference """
+    command = "{0} index -r 3 {1}".format(PALADIN_EXEC, FileStore.get_entry("reference").path)
+    log("Indexing reference:", LOG_INFO)
+    subprocess.run(command, shell=True)
+
+
 def combine_inputs(input_paths):
     """ Concatenate input sequences into single file """
     # Exit if only a single file
@@ -373,6 +386,14 @@ def combine_inputs(input_paths):
 def exec_alignment(options):
     """ Align reads to reference """
     # 1. Execute aligner for the given reads, reference, options and output
+    ref_path = FileStore.get_entry("reference").path
+    input_path = FileStore.get_entry("input").path
+    sam_path = FileStore.get_entry("sam").path
+
+    # Build and execute command
+    log("Executing sequence alignment:", LOG_INFO)
+    command = "{0} align {1} {2} {3} > {4}".format(PALADIN_EXEC, ref_path, input_path, options, sam_path)
+    subprocess.run(command, shell=True)
 
 
 def populate_bins(quality, rank):
@@ -455,8 +476,9 @@ try:
             synonym_lookup = populate_synonyms()
 
             write_reference(accession_lookup, taxonomy_lookup, synonym_lookup)
+            index_reference()
 
-    # Combine input files (mandatory)
+    # Combine inputs (mandatory)
     combine_inputs(args.input)
 
     # Align reads (optional)
