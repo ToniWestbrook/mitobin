@@ -16,7 +16,7 @@ from urllib import request
 from Bio import SeqIO
 
 LOG_ERROR, LOG_WARN, LOG_INFO = range(3)
-PALADIN_EXEC = "/home/anthonyw/repo_personal/unh/paladin/paladin"
+PALADIN_EXEC = "paladin"
 RANK_LIST = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
 RANK_ORDER = {rank: order for (order, rank) in enumerate(RANK_LIST)}
 # All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
