@@ -16,7 +16,7 @@ from urllib import request
 from Bio import SeqIO
 
 LOG_ERROR, LOG_WARN, LOG_INFO = range(3)
-PALADIN_EXEC = "/home/anthonyw/repo_personal/unh/paladin/paladin"
+PALADIN_EXEC = "paladin"
 RANK_LIST = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
 RANK_ORDER = {rank: order for (order, rank) in enumerate(RANK_LIST)}
 # All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
@@ -74,7 +74,7 @@ class FileStore:
                 if entry.handle:
                     entry.handle.close()
 
-        # Delete temporary directorty
+        # Delete temporary directory
         shutil.rmtree(FileStore.temp_path)
 
     @classmethod
@@ -355,7 +355,6 @@ def write_reference(accession_lookup, taxonomy_lookup, synonym_lookup):
 def index_reference():
     """ Create aligner index for the reference """
     command = "{0} index -r 3 {1}".format(PALADIN_EXEC, FileStore.get_entry("reference").path)
-    log("Indexing reference:", LOG_INFO)
     subprocess.run(command, shell=True)
 
 
@@ -428,34 +427,47 @@ def populate_bins(quality, rank):
 
 
 def write_bins(bin_lookup):
-    """ Separate and write reads into appropriate fastq file """
-    read_handle = FileStore.get_entry("input").get_handle("rt")
+    """ Separate and write reads into appropriate fastq and SAM file """
+    input_handles = dict()
+    input_handles["fq"] = FileStore.get_entry("input").get_handle("rt")
+    input_handles["sam"] = FileStore.get_entry("sam").get_handle("rt")
 
-    for line in read_handle:
-        write_handle = None
-        read_id = line[1:].split(" ")[0].rstrip()
+    for input_type in input_handles:
+        for line in input_handles[input_type]:
+            write_handle = None
 
-        # Strip paired end strand ID
-        if len(read_id) > 1 and read_id[-2] == "/":
-            read_id = read_id[:-2]
+            # Skip SAM headers
+            if input_type == "sam" and line.startswith("@"):
+                continue
 
-        # Obtain appropriate handle and write
-        if read_id in bin_lookup:
-            bin_id = "{0}-{1}".format(*bin_lookup[read_id])
+            # Parse read ID
+            if input_type == "fq":
+                read_id = line[1:].split(" ")[0].rstrip()
+            else:
+                read_id = ":".join(line.split()[0].split(":")[3:])
 
-            # Add to FileStore if new
-            if bin_id not in FileStore.entries:
-                FileStore(bin_id, bin_id, "{0}.fq".format(bin_id), None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
+            # Strip paired end strand ID
+            if len(read_id) > 1 and read_id[-2] == "/":
+                read_id = read_id[:-2]
 
-            # Write header
-            write_handle = FileStore.get_entry(bin_id).get_handle("wt", False)
-            write_handle.write(line)
+            # Obtain appropriate handle and write
+            if read_id in bin_lookup:
+                bin_id = "{0}-{1}.".format(*bin_lookup[read_id]) + input_type
 
-        # Write/skip subsequent 3 lines
-        for _ in range(3):
-            remaining = read_handle.readline()
-            if write_handle:
-                write_handle.write(remaining)
+                # Add to FileStore if new
+                if bin_id not in FileStore.entries:
+                    FileStore(bin_id, bin_id, bin_id, None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
+
+                # Write header
+                write_handle = FileStore.get_entry(bin_id).get_handle("wt", False)
+                write_handle.write(line)
+
+            # Write/skip subsequent 3 lines for FASTQ files
+            if input_type == "fq":
+                for _ in range(3):
+                    remaining = input_handles["fq"].readline()
+                    if write_handle:
+                        write_handle.write(remaining)
 
 
 # Parse arguments
