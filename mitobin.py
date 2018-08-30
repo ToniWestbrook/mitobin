@@ -6,6 +6,7 @@ import argparse
 import gzip
 import multiprocessing
 import os
+import resource
 import shutil
 import subprocess
 import sys
@@ -21,74 +22,103 @@ RANK_LIST = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "g
 RANK_ORDER = {rank: order for (order, rank) in enumerate(RANK_LIST)}
 # All ranks used by NCBI: ["superkingdom", "kingdom", "subkingdom", "superphylum", "phylum", "subphylum", "superclass", "class", "subclass", "infraclass", "cohort", "superorder", "order", "parvorder", "suborder", "infraorder", "superfamily", "family", "subfamily", "tribe", "subtribe", "genus", "subgenus", "species group", "species subgroup", "species", "subspecies", "varietas", "forma"]
 
-
 class FileStore:
     """ Manage temporary and cache files """
-    OUTPUT_BASE = "mitobin"
-    CACHE_PATH = os.path.expanduser("~/.mitobin")
-    EXPIRE_AGE = 30
     FTYPE_TEMP, FTYPE_CACHE, FTYPE_OUTPUT, FTYPE_USER = range(4)
-    FOPT_NORMAL, FOPT_GZIP, FOPT_TAR = range(3)
+    FOPT_NORMAL, FOPT_GZIP, FOPT_GZIP_DECOMPRESS, FOPT_TAR = range(4)
 
     # Entries and system generated temporary path
-    entries = dict()
-    temp_path = ""
-    output_path = ""
+    _entries = dict()
+    _output_base = ""
+    _cache_path = ""
+    _temp_path = ""
+    _output_path = ""
+    _expire_age = 0
+    _close_target = 0
+    _open_count = 0
 
     @classmethod
-    def _populate(cls):
-        """ Add all entries to the file store """
-        FileStore("input", "input", "input.fq", None, FileStore.FTYPE_TEMP, FileStore.FOPT_NORMAL)
-        FileStore("reference", "reference", "reference.faa", None, FileStore.FTYPE_CACHE, FileStore.FOPT_NORMAL)
-        FileStore("sam", "sam", "{0}.sam".format(FileStore.OUTPUT_BASE), None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
-        FileStore("synonyms", "synonyms", "synonyms.tsv", None, FileStore.FTYPE_USER, FileStore.FOPT_NORMAL)
-        FileStore("lineage", "lineage", "taxdump.tar.gz", "ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_TAR)
-        FileStore("lineage-names", "lineage-names", "names.dmp", None, FileStore.FTYPE_TEMP, FileStore.FOPT_NORMAL)
-        FileStore("lineage-nodes", "lineage-nodes", "nodes.dmp", None, FileStore.FTYPE_TEMP, FileStore.FOPT_NORMAL)
-        FileStore("mito-gff", "mito-gff1", "mito1.gpff.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.gpff.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
-        FileStore("mito-gff", "mito-gff2", "mito2.gpff.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.2.protein.gpff.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
-        FileStore("mito-seq", "mito-seq1", "mito1.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.faa.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
-        FileStore("mito-seq", "mito-seq2", "mito2.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.2.protein.faa.gz", FileStore.FTYPE_TEMP, FileStore.FOPT_GZIP)
-
-    @classmethod
-    def init(cls, output_path):
+    def init(cls, output_base, cache_path, output_path, expire_age, close_target):
         """ Initialize the file store  """
-        FileStore.temp_path = tempfile.mkdtemp(prefix=FileStore.OUTPUT_BASE)
-        FileStore.output_path = output_path
+        cls._output_base = os.path.expanduser(output_base)
+        cls._cache_path = os.path.expanduser(cache_path)
+        cls._temp_path = tempfile.mkdtemp(prefix=output_base)
+        cls._output_path = os.path.expanduser(output_path)
+        cls._expire_age = expire_age
+        cls._close_target = close_target
 
         # Create normal directories
-        if not os.path.exists(FileStore.output_path):
-            os.makedirs(FileStore.output_path)
-        if not os.path.exists(FileStore.CACHE_PATH):
-            os.makedirs(FileStore.CACHE_PATH)
+        if not os.path.exists(cls._output_path):
+            os.makedirs(cls._output_path)
+        if not os.path.exists(cls._cache_path):
+            os.makedirs(cls._cache_path)
 
-        # Populate file store
-        FileStore._populate()
+        # Populate entries
+        cls._populate()
 
     @classmethod
     def destroy(cls):
         """ Destroy the file store """
         # Close all open files
-        for group in FileStore.entries.values():
+        for group in cls._entries.values():
             for entry in group.values():
                 if entry.handle:
                     entry.handle.close()
+                    cls._open_count -= 1
 
-        # Delete temporary directory
-        shutil.rmtree(FileStore.temp_path)
+        # Delete temporary directorty
+        shutil.rmtree(cls._temp_path)
 
     @classmethod
     def get_entry(cls, name, group=None):
         """ Get a file entry from the store """
         if group:
-            return FileStore.entries[group][name]
+            return cls._entries[group][name]
         else:
-            return FileStore.entries[name][name]
+            return cls._entries[name][name]
 
     @classmethod
     def get_group(cls, group):
         """ Get all entries for a group """
-        return FileStore.entries[group].values()
+        return cls._entries[group].values()
+
+    @classmethod
+    def check_max(cls):
+        """ Check if maximum number of files are open, and if so, close percentage of files """
+        if cls._open_count > resource.getrlimit(resource.RLIMIT_NOFILE)[0] - 5:
+            target_count = int(cls._open_count * cls._close_target)
+
+            # Close open write files until target count has been reached
+            for group in cls._entries:
+                for name in cls._entries[group]:
+                    entry = cls.get_entry(name, group)
+
+                    if entry.mode and ("r" in entry.mode or "+" in entry.mode):
+                        continue
+
+                    # Close file and reduce count
+                    if entry.handle:
+                        entry.handle.close()
+                        entry.handle = None
+                        cls._open_count -= 1
+
+                    if cls._open_count < target_count:
+                        break
+
+    @classmethod
+    def _populate(cls):
+        """ Add all entries to the file store """
+        FileStore("input", "input", "input.fq", None, cls.FTYPE_TEMP, cls.FOPT_NORMAL)
+        FileStore("reference", "reference", "reference.faa", None, cls.FTYPE_CACHE, cls.FOPT_NORMAL)
+        FileStore("sam", "sam", "{0}.sam".format(cls._output_base), None, cls.FTYPE_OUTPUT, cls.FOPT_NORMAL)
+        FileStore("synonyms", "synonyms", "synonyms.tsv", None, cls.FTYPE_USER, cls.FOPT_NORMAL)
+        FileStore("lineage", "lineage", "taxdump.tar.gz", "ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz", cls.FTYPE_TEMP, cls.FOPT_TAR)
+        FileStore("lineage-names", "lineage-names", "names.dmp", None, cls.FTYPE_TEMP, cls.FOPT_NORMAL)
+        FileStore("lineage-nodes", "lineage-nodes", "nodes.dmp", None, cls.FTYPE_TEMP, cls.FOPT_NORMAL)
+        FileStore("mito-gff", "mito-gff1", "mito1.gpff.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.gpff.gz", cls.FTYPE_TEMP, cls.FOPT_GZIP)
+        FileStore("mito-gff", "mito-gff2", "mito2.gpff.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.2.protein.gpff.gz", cls.FTYPE_TEMP, cls.FOPT_GZIP)
+        FileStore("mito-seq", "mito-seq1", "mito1.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.faa.gz", cls.FTYPE_TEMP, cls.FOPT_GZIP)
+        FileStore("mito-seq", "mito-seq2", "mito2.faa.gz", "ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.2.protein.faa.gz", cls.FTYPE_TEMP, cls.FOPT_GZIP)
 
     def __init__(self, group, fid, name, url, ftype, options):
         self.fid = fid
@@ -96,59 +126,99 @@ class FileStore:
         self.ftype = ftype
         self.options = options
         self.handle = None
+        self.mode = None
 
         # Set full path
         self.set_path(name, ftype)
 
         # Add current entry to file store
-        FileStore.entries.setdefault(group, dict())
-        FileStore.entries[group][fid] = self
+        FileStore._entries.setdefault(group, dict())
+        FileStore._entries[group][fid] = self
+
+    def get_path(self):
+        if self.options != FileStore.FOPT_GZIP_DECOMPRESS:
+            return self.path
+
+        # Check if file already decompressed (partial/interrupted possible)
+        decompressed = self.path[:-3]
+        if os.path.exists(decompressed):
+            return decompressed
+        else:
+            return self.path
 
     def set_path(self, name, ftype):
         """ Calculate and set the full path associated with the file """
         if ftype == FileStore.FTYPE_TEMP:
-            self.path = os.path.join(FileStore.temp_path, name)
+            self.path = os.path.join(FileStore._temp_path, name)
         if ftype == FileStore.FTYPE_CACHE:
-            self.path = os.path.join(FileStore.CACHE_PATH, name)
+            self.path = os.path.join(FileStore._cache_path, name)
         if ftype == FileStore.FTYPE_OUTPUT:
-            self.path = os.path.join(FileStore.output_path, name)
+            self.path = os.path.join(FileStore._output_path, name)
         if ftype == FileStore.FTYPE_USER:
             self.path = name
 
-    def get_handle(self, mode, reset=True):
-        """ Return file handle and open if currently closed """
-        if not self.handle:
-            # Note, mode currently cannot be changed after initial open
-            if self.options == FileStore.FOPT_GZIP:
-                self.handle = gzip.open(self.path, mode)
-            else:
-                self.handle = open(self.path, mode)
+    def get_handle(self, mode=None):
+        """ Return file handle, and (re)open if mode specified """
+        # Check if we've reached max number of open files
+        FileStore.check_max()
 
-        if reset:
-            self.handle.seek(0)
+        # Check if handle never opened and no mode specified
+        if not mode and not self.mode:
+            return None
 
+        # Check for existing handle
+        if not mode and self.handle:
+            return self.handle
+
+        # (Re)open file, change previous write to append
+        cur_mode = mode if mode else self.mode.replace("w", "a")
+
+        # Close if previously open
+        if self.handle:
+            self.handle.close()
+            FileStore._open_count -= 1
+
+        if self.options == FileStore.FOPT_GZIP:
+            self.handle = gzip.open(self.get_path(), cur_mode)
+        else:
+            self.handle = open(self.get_path(), cur_mode)
+
+        # Record mode and increase open count
+        self.mode = cur_mode
+        FileStore._open_count += 1
+        
         return self.handle
 
-    def download(self):
-        """ Download the file """
-        if not self.url: return
+    def prepare(self):
+        """ Download and/or decompress the file """
+        # Download file if URL present
+        if self.url:
+            request.urlretrieve(self.url, self.path)
 
-        request.urlretrieve(self.url, self.path)
+        # Decompress if gzip marked for decompression
+        if self.options == FileStore.FOPT_GZIP_DECOMPRESS:
+            with gzip.open(self.path, "rb") as handle_in:
+                with open(self.path[:-3], "wb") as handle_out:
+                    handle_out.write(handle_in.read())
+
+            # Remove old file, update path to decompressed file
+            os.remove(self.path)
+            self.path = self.path[:-3]
 
         # Extract if an archive
         if self.options == FileStore.FOPT_TAR:
-            handle = tarfile.open(self.path, "r")
+            handle = tarfile.open(self.path, "rt")
             handle.extractall(os.path.dirname(self.path))
 
     def exists(self):
         """ Check if file exists """
-        return os.path.exists(self.path)
+        return os.path.exists(self.get_path())
 
     def expired(self):
         """ Check if file is expired """
-        mtime = os.path.getmtime(self.path)
+        mtime = os.path.getmtime(self.get_path())
         age = time.time() - mtime
-        return (age / 86400) > FileStore.EXPIRE_AGE
+        return (age / 86400) > FileStore._expire_age
 
 
 def log(message, level):
@@ -454,12 +524,13 @@ def write_bins(bin_lookup):
             if read_id in bin_lookup:
                 bin_id = "{0}-{1}.".format(*bin_lookup[read_id]) + input_type
 
-                # Add to FileStore if new
-                if bin_id not in FileStore.entries:
-                    FileStore(bin_id, bin_id, bin_id, None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
+                # Add to FileStore and open if new
+                if bin_id not in FileStore._entries:
+                    write_entry = FileStore(bin_id, bin_id, bin_id, None, FileStore.FTYPE_OUTPUT, FileStore.FOPT_NORMAL)
+                    write_entry.get_handle("wt")
 
                 # Write header
-                write_handle = FileStore.get_entry(bin_id).get_handle("wt", False)
+                write_handle = FileStore.get_entry(bin_id).get_handle()
                 write_handle.write(line)
 
             # Write/skip subsequent 3 lines for FASTQ files
@@ -474,7 +545,7 @@ def write_bins(bin_lookup):
 args = parse_args()
 
 # Initialize the file store
-FileStore.init(args.output)
+FileStore.init("mitobin", "~/.mitobin", args.output, 30, 0.5)
 
 # Prepare workflow steps
 work_ref, work_align = prepare_workflow(args)
