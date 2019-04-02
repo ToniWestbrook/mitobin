@@ -207,7 +207,7 @@ class FileStore:
 
         # Extract if an archive
         if self.options == FileStore.FOPT_TAR:
-            handle = tarfile.open(self.path, "rt")
+            handle = tarfile.open(self.path, "r")
             handle.extractall(os.path.dirname(self.path))
 
     def exists(self):
@@ -290,9 +290,9 @@ def download_dbs(force):
     log("Downloading databases", LOG_INFO)
 
     # Download every file with a URL
-    for group in FileStore.entries:
+    for group in FileStore._entries:
         for entry in FileStore.get_group(group):
-            entry.download()
+            entry.prepare()
 
     return True
 
